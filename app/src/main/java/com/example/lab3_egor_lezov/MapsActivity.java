@@ -5,13 +5,10 @@ import android.content.pm.PackageManager;
 import android.location.Location;
 import android.location.LocationListener;
 import android.location.LocationManager;
-import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
-
 import androidx.core.app.ActivityCompat;
 import androidx.fragment.app.FragmentActivity;
-
 import com.google.android.gms.maps.CameraUpdateFactory;
 import com.google.android.gms.maps.GoogleMap;
 import com.google.android.gms.maps.OnMapReadyCallback;
@@ -24,13 +21,14 @@ import com.rabbitmq.client.AlreadyClosedException;
 import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.Connection;
 import com.rabbitmq.client.ConnectionFactory;
-
 import org.json.JSONException;
 import org.json.JSONObject;
-
 import java.io.IOException;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.TimeoutException;
 
 public class MapsActivity extends FragmentActivity implements OnMapReadyCallback, LocationListener {
@@ -42,6 +40,8 @@ public class MapsActivity extends FragmentActivity implements OnMapReadyCallback
     private Channel channel;
     private String queueName = "EgorUTHQueues";
     private boolean isMapReady = false;
+    private String uniqueID = UUID.randomUUID().toString();
+
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -74,7 +74,7 @@ public class MapsActivity extends FragmentActivity implements OnMapReadyCallback
                 } catch (Exception e) {
                     e.printStackTrace();
                     try {
-                        Thread.sleep(2000); // Wait for 5 seconds before trying to reconnect
+                        Thread.sleep(500);
                     } catch (InterruptedException ex) {
                         ex.printStackTrace();
                     }
@@ -105,9 +105,10 @@ public class MapsActivity extends FragmentActivity implements OnMapReadyCallback
 
     private Marker myMarker;
 
-    private final static int UPDATE_INTERVAL = 5000; // milliseconds
+    private final static int UPDATE_INTERVAL = 5000;
     private Handler mHandler = new Handler();
     private Runnable mUpdateRunnable;
+
 
     public void onLocationChanged(Location location) {
         myLocation = location;
@@ -119,10 +120,10 @@ public class MapsActivity extends FragmentActivity implements OnMapReadyCallback
             myMarker.setPosition(myPos);
         }
 
-        sendUserLocation(Build.SERIAL, myLocation.getLatitude(), myLocation.getLongitude());
+        sendUserLocation(uniqueID, myLocation.getLatitude(), myLocation.getLongitude());
 
         for (String username : userPositions.keySet()) {
-            if (!username.equals(Build.SERIAL)) {
+            if (!username.equals(uniqueID)) {
                 LatLng position = userPositions.get(username);
                 Marker marker = markers.get(username);
                 if (marker != null) {
@@ -137,7 +138,7 @@ public class MapsActivity extends FragmentActivity implements OnMapReadyCallback
         }
 
         for (String username : markers.keySet()) {
-            if (!username.equals(Build.SERIAL) && !userPositions.containsKey(username)) {
+            if (!username.equals(uniqueID) && !userPositions.containsKey(username)) {
                 markers.get(username).remove();
                 markers.remove(username);
             }
@@ -156,10 +157,13 @@ public class MapsActivity extends FragmentActivity implements OnMapReadyCallback
 
     private void updateDevicePositions() {
         LatLng myPos = new LatLng(myLocation.getLatitude(), myLocation.getLongitude());
+        if (myMarker != null) {
+            myMarker.remove();
+        }
         myMarker = mMap.addMarker(new MarkerOptions().position(myPos).title("My Position"));
 
         for (String username : userPositions.keySet()) {
-            if (!username.equals(Build.SERIAL)) {
+            if (!username.equals(uniqueID)) {
                 LatLng position = userPositions.get(username);
                 float hue = getHueForUser(username);
                 MarkerOptions markerOptions = new MarkerOptions().position(position).title(username).icon(BitmapDescriptorFactory.defaultMarker(hue));
@@ -199,36 +203,50 @@ public class MapsActivity extends FragmentActivity implements OnMapReadyCallback
                 double longitude = json.getDouble("longitude");
                 LatLng userPos = new LatLng(latitude, longitude);
                 if (userPositions.containsKey(username)) {
-                    // Update existing marker position
                     LatLng oldPos = userPositions.get(username);
                     if (!oldPos.equals(userPos)) {
                         userPositions.put(username, userPos);
-                        runOnUiThread(() -> {
-                            Marker marker = markers.get(username);
-                            if (marker != null) {
-                                marker.remove();
-                            }
-                            float hue = getHueForUser(username);
-                            MarkerOptions markerOptions = new MarkerOptions().position(userPos).title(username).icon(BitmapDescriptorFactory.defaultMarker(hue));
-                            Marker userMarker = mMap.addMarker(markerOptions);
-                            markers.put(username, userMarker);
-                        });
+                        refreshMarkers();
                     }
                 } else {
                     userPositions.put(username, userPos);
-                    float hue = getHueForUser(username);
-                    MarkerOptions markerOptions = new MarkerOptions().position(userPos).title(username).icon(BitmapDescriptorFactory.defaultMarker(hue));
-                    runOnUiThread(() -> {
-                        if (isMapReady) {
-                            Marker userMarker = mMap.addMarker(markerOptions);
-                            markers.put(username, userMarker);
-                        }
-                    });
+                    refreshMarkers();
                 }
             } catch (JSONException e) {
                 throw new RuntimeException(e);
             }
         }, consumerTag -> {});
+
+        Handler handler = new Handler();
+        handler.postDelayed(() -> {
+            refreshMarkers();
+            handler.postDelayed(this::refreshMarkers, 5000);
+        }, 5000);
+    }
+
+    private void refreshMarkers() {
+        runOnUiThread(() -> {
+            Set<String> markersToRemove = new HashSet<>(markers.keySet());
+            for (Map.Entry<String, LatLng> entry : userPositions.entrySet()) {
+                String username = entry.getKey();
+                LatLng userPos = entry.getValue();
+                Marker marker = markers.get(username);
+                if (marker != null) {
+                    marker.setPosition(userPos);
+                    markersToRemove.remove(username);
+                } else {
+                    float hue = getHueForUser(username);
+                    MarkerOptions markerOptions = new MarkerOptions().position(userPos).title(username).icon(BitmapDescriptorFactory.defaultMarker(hue));
+                    Marker userMarker = mMap.addMarker(markerOptions);
+                    markers.put(username, userMarker);
+                }
+            }
+            for (String username : markersToRemove) {
+                Marker marker = markers.get(username);
+                marker.remove();
+                markers.remove(username);
+            }
+        });
     }
 
     private void sendUserLocation(final String username, final double latitude, final double longitude) {
@@ -238,18 +256,24 @@ public class MapsActivity extends FragmentActivity implements OnMapReadyCallback
                 json.put("username", username);
                 json.put("latitude", latitude);
                 json.put("longitude", longitude);
-                channel.basicPublish("", queueName, null, json.toString().getBytes("UTF-8"));
-                channel.waitForConfirmsOrDie();
-            } catch (AlreadyClosedException e) {
-                if (!channel.isOpen()) {
+
+                channel.confirmSelect();
+
+                boolean messageSent = false;
+                while (!messageSent) {
                     try {
-                        channel = factory.newConnection().createChannel();
-                        channel.queueDeclare(queueName, true, false, false, null);
-                    } catch (IOException | TimeoutException ex) {
-                        ex.printStackTrace();
+                        channel.basicPublish("", queueName, null, json.toString().getBytes("UTF-8"));
+                        channel.waitForConfirmsOrDie();
+                        messageSent = true;
+                    } catch (AlreadyClosedException e) {
+                        if (!channel.isOpen()) {
+                            channel = factory.newConnection().createChannel();
+                            channel.queueDeclare(queueName, true, false, false, null);
+                        }
+                    } catch (Exception e) {
+                        e.printStackTrace();
                     }
                 }
-                sendUserLocation(username, latitude, longitude);
             } catch (Exception e) {
                 e.printStackTrace();
             }
