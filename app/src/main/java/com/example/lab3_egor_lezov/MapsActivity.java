@@ -7,6 +7,8 @@ import android.location.LocationListener;
 import android.location.LocationManager;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.Looper;
+
 import androidx.core.app.ActivityCompat;
 import androidx.fragment.app.FragmentActivity;
 import com.google.android.gms.maps.CameraUpdateFactory;
@@ -17,10 +19,7 @@ import com.google.android.gms.maps.model.BitmapDescriptorFactory;
 import com.google.android.gms.maps.model.LatLng;
 import com.google.android.gms.maps.model.Marker;
 import com.google.android.gms.maps.model.MarkerOptions;
-import com.rabbitmq.client.AlreadyClosedException;
-import com.rabbitmq.client.Channel;
-import com.rabbitmq.client.Connection;
-import com.rabbitmq.client.ConnectionFactory;
+
 import org.json.JSONException;
 import org.json.JSONObject;
 import java.io.IOException;
@@ -29,19 +28,18 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.TimeoutException;
 
 public class MapsActivity extends FragmentActivity implements OnMapReadyCallback, LocationListener {
 
-    private GoogleMap mMap;
+    private static GoogleMap mMap;
     private LocationManager locationManager;
     private Location myLocation;
-    private ConnectionFactory factory;
-    private Channel channel;
-    private String queueName = "EgorUTHQueues";
-    private boolean isMapReady = false;
-    private String uniqueID = UUID.randomUUID().toString();
+    public boolean isMapReady = false;
+    public CloudAMQP cloudAMQP;
 
+    public static Handler UIHandler = new Handler(Looper.getMainLooper());
+
+    public static SupportMapFragment mapFragment;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -57,36 +55,18 @@ public class MapsActivity extends FragmentActivity implements OnMapReadyCallback
             myLocation = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER);
         }
 
-        SupportMapFragment mapFragment = (SupportMapFragment) getSupportFragmentManager()
+        cloudAMQP = new CloudAMQP();
+
+        mapFragment = (SupportMapFragment) getSupportFragmentManager()
                 .findFragmentById(R.id.map);
         mapFragment.getMapAsync(this);
-
-        new Thread(() -> {
-            boolean isConnected = false;
-            while (!isConnected) {
-                try {
-                    factory = new ConnectionFactory();
-                    factory.setUri("amqps://umxpcwev:H4-UVPDm5rZ7EiAs_M0n4z7MBBOejhNo@sparrow.rmq.cloudamqp.com/umxpcwev");
-                    Connection connection = factory.newConnection();
-                    channel = connection.createChannel();
-                    isConnected = true;
-                    consumeUserLocations();
-                } catch (Exception e) {
-                    e.printStackTrace();
-                    try {
-                        Thread.sleep(500);
-                    } catch (InterruptedException ex) {
-                        ex.printStackTrace();
-                    }
-                }
-            }
-        }).start();
     }
 
     @Override
     public void onMapReady(GoogleMap googleMap) {
         mMap = googleMap;
         isMapReady = true;
+        cloudAMQP.setupConnection();
         for (String username : deviceLocations.keySet()) {
             LatLng position = deviceLocations.get(username);
             MarkerOptions markerOptions = new MarkerOptions().position(position).title(username);
@@ -105,10 +85,6 @@ public class MapsActivity extends FragmentActivity implements OnMapReadyCallback
 
     private Marker myMarker;
 
-    private final static int UPDATE_INTERVAL = 5000;
-    private Handler mHandler = new Handler();
-    private Runnable mUpdateRunnable;
-
 
     public void onLocationChanged(Location location) {
         myLocation = location;
@@ -120,16 +96,16 @@ public class MapsActivity extends FragmentActivity implements OnMapReadyCallback
             myMarker.setPosition(myPos);
         }
 
-        sendUserLocation(uniqueID, myLocation.getLatitude(), myLocation.getLongitude());
+        sendUserLocation(cloudAMQP.userName, myLocation.getLatitude(), myLocation.getLongitude());
 
         for (String username : userPositions.keySet()) {
-            if (!username.equals(uniqueID)) {
+            if (!username.equals(cloudAMQP.userName)) {
                 LatLng position = userPositions.get(username);
                 Marker marker = markers.get(username);
                 if (marker != null) {
                     marker.setPosition(position);
                 } else {
-                    float hue = getHueForUser(username);
+                    float hue = CloudAMQP.getHueForUser(username);
                     MarkerOptions markerOptions = new MarkerOptions().position(position).title(username).icon(BitmapDescriptorFactory.defaultMarker(hue));
                     Marker userMarker = mMap.addMarker(markerOptions);
                     markers.put(username, userMarker);
@@ -138,21 +114,11 @@ public class MapsActivity extends FragmentActivity implements OnMapReadyCallback
         }
 
         for (String username : markers.keySet()) {
-            if (!username.equals(uniqueID) && !userPositions.containsKey(username)) {
+            if (!username.equals(cloudAMQP.userName) && !userPositions.containsKey(username)) {
                 markers.get(username).remove();
                 markers.remove(username);
             }
         }
-
-        mHandler.removeCallbacks(mUpdateRunnable);
-        mUpdateRunnable = new Runnable() {
-            @Override
-            public void run() {
-                updateDevicePositions();
-                mHandler.postDelayed(this, UPDATE_INTERVAL);
-            }
-        };
-        mHandler.postDelayed(mUpdateRunnable, UPDATE_INTERVAL);
     }
 
     private void updateDevicePositions() {
@@ -163,9 +129,9 @@ public class MapsActivity extends FragmentActivity implements OnMapReadyCallback
         myMarker = mMap.addMarker(new MarkerOptions().position(myPos).title("My Position"));
 
         for (String username : userPositions.keySet()) {
-            if (!username.equals(uniqueID)) {
+            if (!username.equals(cloudAMQP.userName)) {
                 LatLng position = userPositions.get(username);
-                float hue = getHueForUser(username);
+                float hue = CloudAMQP.getHueForUser(username);
                 MarkerOptions markerOptions = new MarkerOptions().position(position).title(username).icon(BitmapDescriptorFactory.defaultMarker(hue));
                 Marker userMarker = mMap.addMarker(markerOptions);
                 markers.put(username, userMarker);
@@ -185,47 +151,40 @@ public class MapsActivity extends FragmentActivity implements OnMapReadyCallback
     public void onProviderDisabled(String provider) {
     }
 
-    private Map<String, LatLng> userPositions = new HashMap<>();
+    public static Map<String, LatLng> userPositions = new HashMap<>();
 
-    private Map<String, Marker> markers = new HashMap<>();
+    private static Map<String, Marker> markers = new HashMap<>();
 
-    private void consumeUserLocations() throws IOException {
-        channel.queueDeclare(queueName, true, false, false, null);
-        channel.basicConsume(queueName, true, (consumerTag, delivery) -> {
-            String message = new String(delivery.getBody(), "UTF-8");
-            System.out.println("Received message: " + message);
-            JSONObject json = null;
-            String username;
-            try {
-                json = new JSONObject(message);
-                username = json.getString("username");
-                double latitude = json.getDouble("latitude");
-                double longitude = json.getDouble("longitude");
-                LatLng userPos = new LatLng(latitude, longitude);
-                if (userPositions.containsKey(username)) {
-                    LatLng oldPos = userPositions.get(username);
-                    if (!oldPos.equals(userPos)) {
-                        userPositions.put(username, userPos);
+    public static void consumeUserLocations(JSONObject json) {
+        UIHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    System.out.println(json.toString());
+                    String userName = (String) json.get("userName");
+                    double latitude = json.getDouble("latitude");
+                    double longitude = json.getDouble("longitude");
+
+                    LatLng userPos = new LatLng(latitude, longitude);
+                    if (userPositions.containsKey(userName)) {
+                        LatLng oldPos = userPositions.get(userName);
+                        if (!oldPos.equals(userPos)) {
+                            userPositions.put(userName, userPos);
+                            refreshMarkers();
+                        }
+                    } else {
+                        userPositions.put(userName, userPos);
                         refreshMarkers();
                     }
-                } else {
-                    userPositions.put(username, userPos);
-                    refreshMarkers();
+                } catch (JSONException e) {
+                    throw new RuntimeException(e);
                 }
-            } catch (JSONException e) {
-                throw new RuntimeException(e);
             }
-        }, consumerTag -> {});
-
-        Handler handler = new Handler();
-        handler.postDelayed(() -> {
-            refreshMarkers();
-            handler.postDelayed(this::refreshMarkers, 5000);
-        }, 5000);
+        });
     }
 
-    private void refreshMarkers() {
-        runOnUiThread(() -> {
+    private static void refreshMarkers() {
+        mapFragment.getActivity().runOnUiThread(() -> {
             Set<String> markersToRemove = new HashSet<>(markers.keySet());
             for (Map.Entry<String, LatLng> entry : userPositions.entrySet()) {
                 String username = entry.getKey();
@@ -235,7 +194,7 @@ public class MapsActivity extends FragmentActivity implements OnMapReadyCallback
                     marker.setPosition(userPos);
                     markersToRemove.remove(username);
                 } else {
-                    float hue = getHueForUser(username);
+                    float hue = CloudAMQP.getHueForUser(username);
                     MarkerOptions markerOptions = new MarkerOptions().position(userPos).title(username).icon(BitmapDescriptorFactory.defaultMarker(hue));
                     Marker userMarker = mMap.addMarker(markerOptions);
                     markers.put(username, userMarker);
@@ -249,51 +208,15 @@ public class MapsActivity extends FragmentActivity implements OnMapReadyCallback
         });
     }
 
-    private void sendUserLocation(final String username, final double latitude, final double longitude) {
-        new Thread(() -> {
-            try {
-                JSONObject json = new JSONObject();
-                json.put("username", username);
-                json.put("latitude", latitude);
-                json.put("longitude", longitude);
-
-                channel.confirmSelect();
-
-                boolean messageSent = false;
-                while (!messageSent) {
-                    try {
-                        channel.basicPublish("", queueName, null, json.toString().getBytes("UTF-8"));
-                        channel.waitForConfirmsOrDie();
-                        messageSent = true;
-                    } catch (AlreadyClosedException e) {
-                        if (!channel.isOpen()) {
-                            channel = factory.newConnection().createChannel();
-                            channel.queueDeclare(queueName, true, false, false, null);
-                        }
-                    } catch (Exception e) {
-                        e.printStackTrace();
-                    }
-                }
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
-        }).start();
-    }
-
-    private float getHueForUser(String username) {
-        int hashCode = username.hashCode();
-        float hue = Math.abs(hashCode % 360);
-        return hue;
-    }
-
-    @Override
-    protected void onStop() {
-        super.onStop();
+    private void sendUserLocation(String userName, final double latitude, final double longitude) {
+        JSONObject json = new JSONObject();
         try {
-            channel.close();
-        } catch (IOException | TimeoutException e) {
-            e.printStackTrace();
+            json.put("userName", userName);
+            json.put("latitude", latitude);
+            json.put("longitude", longitude);
+        } catch (JSONException e) {
+            throw new RuntimeException(e);
         }
+        cloudAMQP.publishToExchange(json);
     }
 }
-
