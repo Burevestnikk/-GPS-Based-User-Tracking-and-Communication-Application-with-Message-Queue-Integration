@@ -1,0 +1,2 @@
+# -GPS-Based-User-Tracking-and-Communication-Application-with-Message-Queue-Integration
+The project is to create an application that uses GPS to obtain data. The application communicates with the queue to exchange information. On the map, the user's position is displayed using an individual icon passed through the queue. In addition, the application displays the positions of other users according to their icons. The user can also set a route and move along it. Students ' applications effectively communicate with each other through the queue.
