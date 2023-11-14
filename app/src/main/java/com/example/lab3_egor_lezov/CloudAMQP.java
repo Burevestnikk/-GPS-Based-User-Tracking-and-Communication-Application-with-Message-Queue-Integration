@@ -19,16 +19,16 @@ import java.util.concurrent.TimeoutException;
 
 public class CloudAMQP {
 
-    String uri = "amqps://hhupcfai:1KqWHDo_4hlOf1jqLr5iMPN_qB0Ty_d4@sparrow.rmq.cloudamqp.com/hhupcfai";
+    String uri = "Insert your values";
     ConnectionFactory factory = new ConnectionFactory();
     Channel channel;
     Thread subscribeThread;
     Thread publishThread;
 
-    static String userName = "31099";
+    static String userName = "Insert your values";
     float colurMarker;
 
-    static final String secretKey = "7vr36cxv8ttc36873wr6x8ifcb";
+    static final String secretKey = "Insert your values";
 
     void setupConnection() {
         try {
